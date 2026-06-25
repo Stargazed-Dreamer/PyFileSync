@@ -1,4 +1,4 @@
-import os
+﻿import os
 import shutil
 from datetime import datetime
 from typing import List
@@ -22,22 +22,35 @@ class BackupWorker(QThread):
                  skip_older: bool, timestamp: datetime, duplicate_mode: str,
                  resume_state: ResumeState | None = None,
                  start_index: int = 0):
+        """初始化文件复制操作对象。
+
+        此构造函数设置操作所需的基本参数和内部状态标志。
+
+        参数:
+            operations (List[FileOperation]): 要执行的文件操作列表。
+            mode (str): 操作模式。
+            skip_older (bool): 是否跳过比给定时间戳更旧的文件。
+            timestamp (datetime): 用于比较文件修改时间的时间戳。
+            duplicate_mode (str): 处理重复文件的策略模式。
+            resume_state (ResumeState | None, 可选): 用于断点续传的状态对象，默认为 None。
+            start_index (int, 可选): 操作列表的开始索引，默认为 0。
+        """
         super().__init__()
         self.operations = operations
         self.mode = mode
         self.skip_older = skip_older
         self.timestamp = timestamp
-        self.duplicate_mode = duplicate_mode  # 'overwrite', 'skip', 'check'
+        self.duplicate_mode = duplicate_mode  # 'overwrite'（覆盖），'skip'（跳过），'check'（检查）
         self.should_stop = False
         self.pause_requested = False
-        self.start_index = max(0, start_index)
+        self.start_index = max(0, start_index)  # 确保起始索引不为负
 
-        # 重复文件处理模式标志位
+        # 根据传入的模式字符串，设置对应的布尔标志位
         self.overwrite_mode = (duplicate_mode == 'overwrite')
         self.skip_mode = (duplicate_mode == 'skip')
         self.check_mode = (duplicate_mode == 'check')
 
-        # 断点续传占位（未来启用）
+        # 初始化断点续传状态（当前版本可能未完全启用）
         self.resume_state = resume_state
 
     def run(self):

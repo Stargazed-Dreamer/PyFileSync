@@ -1,4 +1,4 @@
-import os
+﻿import os
 from datetime import datetime
 from typing import List, Tuple
 
@@ -844,17 +844,38 @@ class FileBackupTool(QMainWindow):
         event.accept()
 
     def showEvent(self, event):
+        """
+        窗口显示事件处理方法，在窗口首次显示时检查并提示加载进度文件。
+    
+        功能：
+            - 调用父类的showEvent方法。
+            - 在窗口首次显示时，检测是否存在进度文件，并提示用户是否加载。
+            - 如果用户选择加载，则调用_load_and_display_progress方法。
+            - 异常处理，记录错误信息。
+    
+        参数：
+            event (QShowEvent): 窗口显示事件对象，包含事件相关信息。
+    
+        返回值：
+            无返回值。
+        """
         super().showEvent(event)
         # 启动时检测进度文件并提示读取
         try:
+            # 使用全局变量，避免在程序生命周期内重复检查进度文件
             global b_progress_file_checked
+            # 检查进度文件是否存在且尚未检查过
             if has_progress_file() and not b_progress_file_checked:
+                # 弹出对话框询问用户是否加载进度
                 reply = QMessageBox.question(self, "发现进度文件", "检测到 progress.txt，是否读取上次进度？",
                                              QMessageBox.Yes | QMessageBox.No)
+                # 如果用户选择“是”，则加载并显示进度
                 if reply == QMessageBox.Yes:
                     self._load_and_display_progress()
+                # 标记进度文件已检查，避免再次提示
                 b_progress_file_checked = True
         except Exception as e:
+            # 记录加载进度文件时可能发生的异常
             self.log_message(f"加载进度文件时出错: {e}")
     
     def _load_and_display_progress(self):

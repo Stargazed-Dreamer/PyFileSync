@@ -1,4 +1,4 @@
-from datetime import datetime
+﻿from datetime import datetime
 from typing import List, Dict, Any
 import json
 
@@ -94,8 +94,13 @@ def _find_rule_index_for_operation(operation: FileOperation, path_rules: List[Pa
     return 0
 
 def has_progress_file() -> bool:
-    import os
-    return os.path.exists(PROGRESS_FILE)
+    """
+    此函数用于检查进度文件是否存在。
+    无参数。
+    返回布尔值，指示进度文件是否存在。
+    """
+    import os  # 导入操作系统模块，用于文件路径操作
+    return os.path.exists(PROGRESS_FILE)  # 检查常量PROGRESS_FILE指定的文件是否存在，并返回结果
 
 def read_progress() -> tuple[List[FileOperation], int, str, bool, datetime, List[PathRule], Dict[str, Any], str]:
     """读取进度文件

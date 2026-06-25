@@ -1,4 +1,4 @@
-import os
+﻿import os
 from typing import List, Callable, Optional, Tuple
 
 from models import FileOperation, PathRule
@@ -8,8 +8,19 @@ class PreviewManager:
     """预览管理器，负责处理文件操作的预览逻辑"""
     
     def __init__(self, log_callback: Optional[Callable[[str], None]] = None):
+        """
+        初始化日志记录器实例。
+
+        Args:
+            log_callback (Optional[Callable[[str], None]]): 可选的日志记录回调函数。
+                如果未提供，则默认使用一个不执行任何操作的lambda函数。
+
+        Returns:
+            None
+        """
+        # 如果log_callback参数为空（None），则使用一个默认的、不执行任何操作的lambda函数作为后备
         self.log_callback = log_callback or (lambda msg: None)
-        self.operations: List[FileOperation] = []
+        self.operations: List[FileOperation] = []  # 用于存储待执行或已执行的文件操作记录
     
     def log(self, message: str):
         """记录日志"""
