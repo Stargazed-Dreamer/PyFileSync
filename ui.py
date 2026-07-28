@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTextEdit, QGroupBox, QRadioButton, QCheckBox, QFileDialog, QMessageBox,
     QProgressBar, QSplitter, QScrollArea, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QSizePolicy, QTabWidget, QApplication
+    QAbstractItemView, QSizePolicy, QTabWidget, QApplication, QDialog
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -16,7 +16,10 @@ from worker import BackupWorker
 from widgets import DropLineEdit
 from config import load_config, write_config, update_timestamp_file
 from progress import write_progress, has_progress_file, read_progress
-from preview import PreviewManager
+from preview import PreviewManager, PreviewWorker
+import adb_bridge
+from adb_browser import PhoneBrowserDialog
+import logger
 
 b_progress_file_checked = False
 
@@ -36,8 +39,20 @@ class FileBackupTool(QMainWindow):
         
         # 初始化预览管理器
         self.preview_manager = PreviewManager(log_callback=self.log_message)
+        self._preview_worker: PreviewWorker | None = None
+
+        # ADB 可用性检测（项目迁移到无 ADB 环境时优雅降级）
+        self._adb_available = adb_bridge.is_adb_available()
 
         self.init_ui()
+
+        if not self._adb_available:
+            self.src_browse_phone_btn.setEnabled(False)
+            self.des_browse_phone_btn.setEnabled(False)
+            self.src_browse_phone_btn.setToolTip("未检测到 ADB，请安装 Android Platform Tools")
+            self.des_browse_phone_btn.setToolTip("未检测到 ADB，请安装 Android Platform Tools")
+            self.log_message("⚠️ 未检测到 ADB，手机相关功能已禁用（本地备份不受影响）")
+            logger.log("ADB 不可用，手机功能已禁用", 'WARNING')
 
     def init_ui(self):
         """初始化UI"""
@@ -149,16 +164,26 @@ class FileBackupTool(QMainWindow):
         
         src_layout = QVBoxLayout()
         src_layout.addWidget(QLabel("源路径:"))
+        src_row = QHBoxLayout()
         self.src_input = DropLineEdit()
         self.src_input.setPlaceholderText("拖放文件或文件夹到这里")
-        src_layout.addWidget(self.src_input)
+        src_row.addWidget(self.src_input, 1)
+        self.src_browse_phone_btn = QPushButton("浏览手机")
+        self.src_browse_phone_btn.clicked.connect(lambda: self._browse_phone(self.src_input))
+        src_row.addWidget(self.src_browse_phone_btn)
+        src_layout.addLayout(src_row)
         paths_row.addLayout(src_layout, 1)
         
         des_layout = QVBoxLayout()
         des_layout.addWidget(QLabel("目标路径:"))
+        des_row = QHBoxLayout()
         self.des_input = DropLineEdit()
         self.des_input.setPlaceholderText("拖放文件或文件夹到这里")
-        des_layout.addWidget(self.des_input)
+        des_row.addWidget(self.des_input, 1)
+        self.des_browse_phone_btn = QPushButton("浏览手机")
+        self.des_browse_phone_btn.clicked.connect(lambda: self._browse_phone(self.des_input))
+        des_row.addWidget(self.des_browse_phone_btn)
+        des_layout.addLayout(des_row)
         paths_row.addLayout(des_layout, 1)
         
         edit_layout.addLayout(paths_row)
@@ -289,6 +314,20 @@ class FileBackupTool(QMainWindow):
         self.tab_widget.addTab(ops_tab, "操作预览")
 
 
+    def _browse_phone(self, input_field):
+        """打开手机目录浏览器，选中后填入对应输入框"""
+        if not self._adb_available:
+            QMessageBox.warning(self, "ADB 不可用",
+                                "未检测到 ADB 命令。\n请安装 Android Platform Tools 并确保 adb 在 PATH 中。")
+            return
+        try:
+            dialog = PhoneBrowserDialog(self)
+            if dialog.exec() == QDialog.Accepted and dialog.selected_path:
+                input_field.setText(dialog.selected_path)
+                self.log_message(f"已选择手机路径: {dialog.selected_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"浏览手机目录时出错:\n{str(e)}")
+
     def add_path_pair(self):
         """添加路径对到表格"""
         src_path = self.src_input.text().strip()
@@ -296,7 +335,20 @@ class FileBackupTool(QMainWindow):
         if not src_path or not des_path:
             QMessageBox.warning(self, "警告", "请输入源路径和目标路径")
             return
-        if not os.path.exists(src_path):
+        
+        # T15: 拒绝双 ADB 路径（不支持手机→手机）
+        if adb_bridge.is_adb_path(src_path) and adb_bridge.is_adb_path(des_path):
+            QMessageBox.warning(self, "警告", "不支持手机→手机复制（两端都是手机路径）。\n请将一端改为本地路径。")
+            return
+        
+        # ADB 可用性校验：ADB 路径在无 ADB 环境下不可用
+        if not self._adb_available and (adb_bridge.is_adb_path(src_path) or adb_bridge.is_adb_path(des_path)):
+            QMessageBox.warning(self, "ADB 不可用",
+                                "路径包含 adb:// 但未检测到 ADB 命令。\n请安装 Android Platform Tools。")
+            return
+        
+        # T15: 路径有效性校验（本地 + ADB 统一）
+        if not adb_bridge.exists(src_path):
             QMessageBox.warning(self, "警告", f"源路径不存在: {src_path}")
             return
 
@@ -472,6 +524,12 @@ class FileBackupTool(QMainWindow):
         self.reload_btn.setEnabled(False)
         config_layout.addWidget(self.reload_btn)
 
+        self.robocopy_check = QCheckBox("使用 RoboCopy（Windows）")
+        self.robocopy_check.setChecked(True)
+        self.robocopy_check.setEnabled(os.name == 'nt')
+        self.robocopy_check.setToolTip("Windows 上按目录批量复制明确文件；不可用时自动回退")
+        config_layout.addWidget(self.robocopy_check)
+
         config_layout.addStretch()
 
         self.preview_btn = QPushButton("预览操作")
@@ -536,11 +594,16 @@ class FileBackupTool(QMainWindow):
             QMessageBox.critical(self, "错误", f"加载配置文件失败: {str(e)}")
 
     def preview_operations(self):
-        """预览操作"""
+        """预览操作（后台线程执行，避免 UI 冻结）"""
         if not self.path_rules:
             self.log_message("没有路径规则可预览")
             return
         
+        # 防止重复预览
+        if self._preview_worker and self._preview_worker.isRunning():
+            self.log_message("预览正在进行中，请稍候...")
+            return
+
         # 如果没有配置文件，提醒用户路径表不会被保存
         if not self.config_file:
             reply = QMessageBox.question(
@@ -557,36 +620,68 @@ class FileBackupTool(QMainWindow):
             self.log_message("没有启用的路径规则可预览")
             return
         
-        # 使用预览管理器处理启用的路径规则
-        self.operations = self.preview_manager.preview_operations(enabled_rules)
+        # ADB 可用性校验：ADB 路径在无 ADB 环境下不可用
+        if not self._adb_available:
+            has_adb_rule = any(
+                adb_bridge.is_adb_path(rule.src_dir) or adb_bridge.is_adb_path(rule.des_dir)
+                for rule in enabled_rules
+            )
+            if has_adb_rule:
+                QMessageBox.warning(self, "ADB 不可用",
+                                    "路径规则包含 ADB 路径，但未检测到 ADB 命令。\n请安装 Android Platform Tools。")
+                return
         
+        # 禁用预览按钮，防止重复点击
+        self.preview_btn.setEnabled(False)
+        self.preview_btn.setText("预览中...")
+        self.log_message(f"开始预览 {len(enabled_rules)} 个路径规则（后台执行）")
+
+        # 创建后台预览线程
+        self._preview_worker = PreviewWorker(self.preview_manager, enabled_rules)
+        self._preview_worker.logSignal.connect(self.log_message)
+        self._preview_worker.finishedSignal.connect(self._on_preview_finished)
+        self._preview_worker.start()
+
+    def _on_preview_finished(self, operations: list):
+        """预览完成回调（主线程执行）"""
+        self.operations = operations
+        self.preview_btn.setEnabled(True)
+        self.preview_btn.setText("预览操作")
+
+        if not operations:
+            self.log_message("预览完成：无操作")
+            return
+
         # 显示操作摘要
         summary = self.preview_manager.get_operation_summary()
         self.operations_display.clear()
         self.operations_display.append(summary)
         self.operations_display.append("-" * 50)
-        
+
         # 使用合并算法显示详细操作列表
         merged_display = self.preview_manager.get_merged_operation_display()
         for line in merged_display:
-            if line.strip():  # 跳过空行
+            if line.strip():
                 self.operations_display.append(line)
-        
+
         # 预览完成后立即保存断点数据
-        if self.operations:
-            mode = "backup"  # 使用默认的备份模式
-            self.mode = mode
-            # 实际duplicate_mode由各路径规则决定，但为兼容性保存为'per_rule'
-            self.duplicate_mode = 'per_rule'
-            write_progress(self.operations, 0, mode, self.duplicate_mode, self.skip_older.isChecked(), self.timestamp, self.path_rules)
-            self.log_message("已保存预览断点到 progress.txt")
+        mode = "backup"
+        self.mode = mode
+        self.duplicate_mode = 'per_rule'
+        write_progress(self.operations, 0, mode, self.duplicate_mode,
+                       self.skip_older.isChecked(), self.timestamp, self.path_rules)
+        self.log_message("已保存预览断点到 progress.txt")
 
         self.execute_btn.setEnabled(True)
-        
+
         # 自动切换到操作预览标签页
-        self.tab_widget.setCurrentIndex(1)  # 切换到第二个标签页（操作预览）
-        
+        self.tab_widget.setCurrentIndex(1)
+
         self.log_message(f"预览完成: {len(self.operations)} 个操作待执行")
+
+    def _selected_copy_backend(self) -> str:
+        """返回当前选择的复制后端。"""
+        return 'robocopy' if self.robocopy_check.isChecked() else 'python'
 
     def execute_backup(self):
         """执行备份"""
@@ -599,17 +694,62 @@ class FileBackupTool(QMainWindow):
 
         self.duplicate_mode = 'per_rule'
 
-        reply = QMessageBox.question(
-            self, "确认执行",
-            f"确定要执行{mode}操作吗？\n共 {len(self.operations)} 个文件",
-            QMessageBox.Yes | QMessageBox.No
+        # T14: ADB 路径设备确认
+        has_adb = any(
+            adb_bridge.is_adb_path(op.src_path) or adb_bridge.is_adb_path(op.des_path)
+            for op in self.operations if op.operation in ('copy', 'delete')
         )
+        if has_adb:
+            if not self._adb_available:
+                QMessageBox.critical(self, "ADB 不可用",
+                                     "操作包含 ADB 路径，但未检测到 ADB 命令。\n请安装 Android Platform Tools 并重试。")
+                return
+            try:
+                devices = adb_bridge.list_devices()
+            except OSError as e:
+                QMessageBox.critical(self, "错误", f"无法获取设备列表:\n{e}")
+                return
+
+            connected = {d['serial']: d['model'] for d in devices}
+
+            # 收集操作中涉及的所有设备序列号
+            serials = set()
+            for op in self.operations:
+                for path in (op.src_path, op.des_path):
+                    if adb_bridge.is_adb_path(path):
+                        serial, _ = adb_bridge.parse_adb_path(path)
+                        serials.add(serial)
+
+            # 检查设备是否在线
+            for serial in serials:
+                if serial not in connected:
+                    QMessageBox.warning(
+                        self, "设备未连接",
+                        f"设备 {serial} 未连接，无法执行备份。\n请确认手机已通过 USB 连接并启用了 USB 调试。"
+                    )
+                    return
+
+            device_info = "\n".join(
+                f"  {connected.get(s, s)} ({s})" for s in serials
+            )
+            reply = QMessageBox.question(
+                self, "确认执行",
+                f"确定要执行{mode}操作吗？\n共 {len(self.operations)} 个文件\n\n涉及设备:\n{device_info}",
+                QMessageBox.Yes | QMessageBox.No
+            )
+        else:
+            reply = QMessageBox.question(
+                self, "确认执行",
+                f"确定要执行{mode}操作吗？\n共 {len(self.operations)} 个文件",
+                QMessageBox.Yes | QMessageBox.No
+            )
         if reply != QMessageBox.Yes:
             return
 
         self.worker = BackupWorker(
             self.operations, mode, self.skip_older.isChecked(),
-            self.timestamp, self.duplicate_mode, start_index=0
+            self.timestamp, self.duplicate_mode, start_index=0,
+            copy_backend=self._selected_copy_backend()
         )
 
         self.worker.progress_updated.connect(self.update_progress)
@@ -642,7 +782,8 @@ class FileBackupTool(QMainWindow):
         # 创建新的工作线程从当前索引开始
         self.worker = BackupWorker(
             self.operations, self.mode, self.skip_older.isChecked(),
-            self.timestamp, 'overwrite', start_index=current_index
+            self.timestamp, self.duplicate_mode, start_index=current_index,
+            copy_backend=self._selected_copy_backend()
         )
         
         self.worker.progress_updated.connect(self.update_progress)
@@ -733,9 +874,10 @@ class FileBackupTool(QMainWindow):
                 self.log_message("已保存断点进度到 progress.txt")
 
     def log_message(self, message: str):
-        """添加日志消息"""
+        """添加日志消息（同时显示到 UI 和写入文件）"""
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_display.append(f"[{ts}] {message}")
+        logger.log(message)
 
     def add_exclude_item(self):
         text = self.exclude_input.text().strip()
@@ -1166,8 +1308,7 @@ class FileBackupTool(QMainWindow):
         # 根据列宽动态调整最大值
         max_chars = min(300, int(width / 4))  # 最多显示300字符或宽度的1/4
 
-        #return max(min_chars, min(char_count, max_chars))
-        return 60
+        return max(min_chars, min(char_count, max_chars))
 
     def _on_enable_checkbox_changed(self, row: int, state: int):
         """处理启用/禁用复选框状态改变"""

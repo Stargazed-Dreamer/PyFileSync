@@ -1,7 +1,43 @@
 ﻿import os
+import posixpath
 from typing import List, Callable, Optional, Tuple
 
+from PySide6.QtCore import QThread, Signal
+
 from models import FileOperation, PathRule
+import adb_bridge
+import logger
+
+
+class PreviewWorker(QThread):
+    """后台预览线程，避免大量文件扫描阻塞 UI
+
+    用法：
+        worker = PreviewWorker(preview_manager, rules)
+        worker.logSignal.connect(self.log_message)
+        worker.finishedSignal.connect(self._on_preview_done)
+        worker.start()
+    """
+    logSignal = Signal(str)
+    finishedSignal = Signal(list)  # List[FileOperation]
+
+    def __init__(self, preview_manager: 'PreviewManager', rules: List[PathRule]):
+        super().__init__()
+        self._pm = preview_manager
+        self._rules = rules
+
+    def run(self):
+        try:
+            # 临时将日志回调指向信号，线程安全
+            orig_cb = self._pm.log_callback
+            self._pm.log_callback = lambda msg: self.logSignal.emit(msg)
+            ops = self._pm.preview_operations(self._rules)
+            self._pm.log_callback = orig_cb
+            self.finishedSignal.emit(ops)
+        except Exception as e:
+            self.logSignal.emit(f"❌ 预览出错: {e}")
+            logger.log_error("预览线程异常退出", e)
+            self.finishedSignal.emit([])
 
 
 class PreviewManager:
@@ -25,6 +61,31 @@ class PreviewManager:
     def log(self, message: str):
         """记录日志"""
         self.log_callback(f"[预览] {message}")
+
+    @staticmethod
+    def _compute_rel_path(filepath: str, base_dir: str) -> str:
+        """计算文件相对于基础目录的相对路径，支持 ADB 路径
+
+        返回统一使用 / 分隔符（本地路径后续 os.path.join 能正确处理）
+        """
+        if adb_bridge.is_adb_path(base_dir):
+            _, android_base = adb_bridge.parse_adb_path(base_dir)
+            _, android_file = adb_bridge.parse_adb_path(filepath)
+            return posixpath.relpath(android_file, android_base)
+        return os.path.relpath(filepath, base_dir).replace('\\', '/')
+
+    @staticmethod
+    def _build_path(base_dir: str, rel_path: str) -> str:
+        """拼接基础目录和相对路径，支持 ADB 路径
+
+        ADB 路径用 posixpath.join（正斜杠），本地路径用 os.path.join
+        """
+        rel_path = rel_path.replace('\\', '/')
+        if adb_bridge.is_adb_path(base_dir):
+            serial, android_base = adb_bridge.parse_adb_path(base_dir)
+            android_path = posixpath.join(android_base, rel_path)
+            return adb_bridge.build_adb_path(serial, android_path)
+        return os.path.normpath(os.path.join(base_dir, rel_path))
     
     def preview_operations(self, path_rules: List[PathRule]) -> List[FileOperation]:
         """
@@ -37,6 +98,7 @@ class PreviewManager:
             操作列表
         """
         self.log(f"开始预览操作，共 {len(path_rules)} 个路径规则")
+        logger.log_session_start('预览', len(path_rules))
         self.operations = []
         
         # 保存路径规则信息，用于后续的显示分组
@@ -45,18 +107,25 @@ class PreviewManager:
         for i, rule in enumerate(path_rules):
             self.log(f"处理路径规则 {i+1}/{len(path_rules)}: {rule.src_dir} -> {rule.des_dir}")
             
-            if not os.path.exists(rule.src_dir):
-                self.log(f"⚠️ 源路径不存在，跳过: {rule.src_dir}")
-                continue
-            
-            if os.path.isfile(rule.src_dir):
-                self.log(f"处理单个文件: {rule.src_dir}")
-                self._process_single_file(rule, rule.des_dir, i)
-            elif os.path.isdir(rule.src_dir):
-                self.log(f"处理文件夹: {rule.src_dir}")
-                self._process_directory(rule, rule.des_dir, i)
-            else:
-                self.log(f"❌ 未知的源路径类型: {rule.src_dir}")
+            try:
+                if not adb_bridge.exists(rule.src_dir):
+                    self.log(f"⚠️ 源路径不存在，跳过: {rule.src_dir}")
+                    logger.log(f"源路径不存在，跳过: {rule.src_dir}", 'WARNING')
+                    continue
+                
+                if adb_bridge.is_file(rule.src_dir):
+                    self.log(f"处理单个文件: {rule.src_dir}")
+                    self._process_single_file(rule, rule.des_dir, i)
+                elif adb_bridge.is_dir(rule.src_dir):
+                    self.log(f"处理文件夹: {rule.src_dir}")
+                    self._process_directory(rule, rule.des_dir, i)
+                else:
+                    self.log(f"❌ 未知的源路径类型: {rule.src_dir}")
+                    logger.log(f"未知源路径类型: {rule.src_dir}", 'WARNING')
+            except Exception as e:
+                # 单规则失败不中止整个预览
+                self.log(f"❌ 处理规则 {i+1} 时出错: {e}，跳过此规则")
+                logger.log_error(f"预览规则 {i+1} 出错 ({rule.src_dir} -> {rule.des_dir})", e)
         
         # 统计操作数量
         copy_count = sum(1 for op in self.operations if op.operation == 'copy')
@@ -67,6 +136,8 @@ class PreviewManager:
         self.log(f"  - 新复制: {copy_count - overwrite_count} 个文件")
         self.log(f"  - 覆盖更新: {overwrite_count} 个文件")
         self.log(f"  - 删除: {delete_count} 个文件")
+        
+        logger.log_session_end('预览', copy_count - overwrite_count + delete_count, 0, overwrite_count, 0)
         
         return self.operations
     
@@ -83,8 +154,8 @@ class PreviewManager:
         filename = os.path.basename(src_file)
         
         # 确定目标文件路径
-        if os.path.isdir(des_path):
-            des_file = os.path.join(des_path, filename)
+        if adb_bridge.is_dir(des_path):
+            des_file = self._build_path(des_path, filename)
             self.log(f"  目标为文件夹，目标文件: {des_file}")
         else:
             des_file = des_path
@@ -98,8 +169,8 @@ class PreviewManager:
         
         # 检查是否需要复制
         if self._should_copy_file(src_file, des_file, rule.duplicate_mode):
-            is_overwrite = os.path.exists(des_file)
-            file_size = os.path.getsize(src_file)
+            is_overwrite = adb_bridge.exists(des_file)
+            file_size = adb_bridge.getsize(src_file)
             
             operation_desc = "覆盖" if is_overwrite else "新建"
             #self.log(f"  ➕ {operation_desc}文件: {filename} ({file_size} 字节)")
@@ -116,167 +187,171 @@ class PreviewManager:
     def _process_directory(self, rule: PathRule, des_dir: str, rule_index: int):
         """
         处理文件夹的复制和删除操作
-        
-        Args:
-            rule: 路径规则
-            des_dir: 目标文件夹路径
-            rule_index: 规则索引
+
+        性能关键：源和目标都批量扫描一次（各一次 ADB 调用），
+        之后全部在内存中比较，避免逐文件 ADB shell 调用。
         """
         src_dir = rule.src_dir
         self.log(f"  开始遍历源文件夹: {src_dir}")
-        
-        # 统计处理的文件数量
+
         files_processed = 0
         files_filtered = 0
         files_to_copy = 0
-        
-        # 处理源文件夹中的所有文件
-        for root, dirs, files in os.walk(src_dir):
-            # 记录当前处理的相对路径
-            rel_root = os.path.relpath(root, src_dir)
-            if rel_root == '.':
-                rel_root = ''
-            
-            self.log(f"    扫描文件夹: {rel_root if rel_root else '(根目录)'} - {len(files)} 个文件")
-            
-            for file in files:
-                files_processed += 1
-                src_file = os.path.join(root, file)
-                rel_path = os.path.relpath(src_file, src_dir)
-                des_file = os.path.join(des_dir, rel_path)
-                
-                # 检查过滤条件
-                if self._is_filtered_out(rel_path, rule.excludes, rule.includes, src_file):
-                    files_filtered += 1
-                    if files_filtered <= 5:  # 只显示前5个被过滤的文件
-                        self.log(f"      🚫 过滤文件: {rel_path}")
-                    elif files_filtered == 6:
-                        self.log(f"      ... (更多被过滤的文件将不再显示)")
-                    continue
-                
-                # 检查是否需要复制
-                if self._should_copy_file(src_file, des_file, rule.duplicate_mode):
-                    is_overwrite = os.path.exists(des_file)
-                    file_size = os.path.getsize(src_file)
-                    
-                    operation_desc = "覆盖" if is_overwrite else "新建"
-                    #self.log(f"      ➕ {operation_desc}: {rel_path} ({file_size} 字节)")
-                    files_to_copy += 1
-                    
-                    op = FileOperation(
-                        'copy', src_file, des_file, file_size,
-                        is_overwrite=is_overwrite, operation_location='source', rule_index=rule_index
-                    )
-                    self.operations.append(op)
-                else:
-                    #self.log(f"      ⏭️ 跳过: {rel_path} (无需更新)")
-                    pass
-        
+
+        # 批量扫描源目录（一次 ADB 调用 / 一次 os.walk）
+        all_files = adb_bridge.scan_files(src_dir)
+        self.log(f"    扫描到 {len(all_files)} 个源文件")
+
+        # 批量扫描目标目录，构建 {rel_path: (size, mtime)} 字典（一次调用）
+        des_files_map: dict[str, tuple[int, float]] = {}
+        if adb_bridge.exists(des_dir):
+            des_files = adb_bridge.scan_files(des_dir)
+            for des_file, des_size, des_mtime in des_files:
+                rel = self._compute_rel_path(des_file, des_dir)
+                des_files_map[rel] = (des_size, des_mtime)
+            self.log(f"    扫描到 {len(des_files_map)} 个目标文件")
+
+        # 构建源文件相对路径集合（供完全同步删除检查用）
+        src_rel_paths: set[str] = set()
+
+        for src_file, file_size, file_mtime in all_files:
+            files_processed += 1
+            rel_path = self._compute_rel_path(src_file, src_dir)
+            src_rel_paths.add(rel_path)
+            des_file = self._build_path(des_dir, rel_path)
+
+            # 检查过滤条件
+            if self._is_filtered_out(rel_path, rule.excludes, rule.includes, src_file):
+                files_filtered += 1
+                if files_filtered <= 5:
+                    self.log(f"      🚫 过滤文件: {rel_path}")
+                elif files_filtered == 6:
+                    self.log(f"      ... (更多被过滤的文件将不再显示)")
+                continue
+
+            # 从字典中获取目标文件元数据（内存查询，零 ADB 调用）
+            des_meta = des_files_map.get(rel_path)
+            if des_meta is not None:
+                des_exists = True
+                des_size, des_mtime = des_meta
+            else:
+                des_exists = False
+                des_size, des_mtime = None, None
+
+            # 检查是否需要复制（全部用预取的元数据，无 ADB 调用）
+            if self._should_copy_file(
+                src_file, des_file, rule.duplicate_mode,
+                src_size=file_size, src_mtime=file_mtime,
+                des_exists=des_exists, des_size=des_size, des_mtime=des_mtime
+            ):
+                is_overwrite = des_exists
+                files_to_copy += 1
+
+                op = FileOperation(
+                    'copy', src_file, des_file, file_size,
+                    is_overwrite=is_overwrite, operation_location='source', rule_index=rule_index
+                )
+                self.operations.append(op)
+
         self.log(f"  源文件夹扫描完成: {files_processed} 个文件，过滤 {files_filtered} 个，需复制 {files_to_copy} 个")
-        
+
         # 如果是完全同步模式，处理目标文件夹中多余的文件
         if getattr(rule, 'change_mode', 'incremental') == 'sync':
             self.log(f"  完全同步模式：检查目标文件夹中多余的文件")
-            self._process_sync_deletions(rule, src_dir, des_dir, rule_index)
+            self._process_sync_deletions(rule, src_dir, des_dir, rule_index, src_rel_paths)
         else:
             self.log(f"  增量更新模式：跳过删除检查")
     
-    def _process_sync_deletions(self, rule: PathRule, src_dir: str, des_dir: str, rule_index: int):
+    def _process_sync_deletions(self, rule: PathRule, src_dir: str, des_dir: str,
+                                rule_index: int, src_rel_paths: set[str] | None = None):
         """
         处理完全同步模式下的删除操作
-        
-        Args:
-            rule: 路径规则
-            src_dir: 源文件夹路径
-            des_dir: 目标文件夹路径
-            rule_index: 规则索引
+
+        src_rel_paths 为源文件相对路径集合，提供时用内存查询替代逐文件 exists。
         """
-        if not os.path.exists(des_dir):
+        if not adb_bridge.exists(des_dir):
             self.log(f"    目标文件夹不存在，无需删除: {des_dir}")
             return
-        
+
         files_to_delete = 0
         files_filtered = 0
-        
-        for root, dirs, files in os.walk(des_dir):
-            rel_root = os.path.relpath(root, des_dir)
-            if rel_root == '.':
-                rel_root = ''
-            
-            for file in files:
-                des_file = os.path.join(root, file)
-                rel_path = os.path.relpath(des_file, des_dir)
-                src_file = os.path.join(src_dir, rel_path)
-                
-                # 检查源文件是否存在
-                if not os.path.exists(src_file):
-                    # 检查过滤条件（需要同时检查相对路径和对应的源路径）
-                    # 使用相对路径过滤（相对于源目录）
-                    rel_path_filtered = self._is_filtered_out(rel_path, rule.excludes, rule.includes)
-                    # 使用绝对路径过滤（检查源路径是否被排除）
-                    src_path_filtered = self._is_filtered_out("", rule.excludes, rule.includes, src_file)
-                    
-                    if rel_path_filtered or src_path_filtered:
-                        files_filtered += 1
-                        if files_filtered <= 3:  # 只显示前3个被过滤的删除操作
-                            self.log(f"      🚫 跳过删除被过滤的文件: {rel_path}")
-                        continue
-                    
-                    file_size = os.path.getsize(des_file)
-                    self.log(f"      🗑️ 删除多余文件: {rel_path} ({file_size} 字节)")
-                    files_to_delete += 1
-                    
-                    op = FileOperation(
-                        'delete', '', des_file, file_size,
-                        operation_location='target', rule_index=rule_index
-                    )
-                    self.operations.append(op)
-        
+
+        for des_file, file_size, file_mtime in adb_bridge.scan_files(des_dir):
+            rel_path = self._compute_rel_path(des_file, des_dir)
+
+            # 用预建的源路径集合判断（内存查询），无则回退到 exists
+            if src_rel_paths is not None:
+                src_exists = rel_path in src_rel_paths
+            else:
+                src_file = self._build_path(src_dir, rel_path)
+                src_exists = adb_bridge.exists(src_file)
+
+            if not src_exists:
+                rel_path_filtered = self._is_filtered_out(rel_path, rule.excludes, rule.includes)
+                src_file = self._build_path(src_dir, rel_path)
+                src_path_filtered = self._is_filtered_out("", rule.excludes, rule.includes, src_file)
+
+                if rel_path_filtered or src_path_filtered:
+                    files_filtered += 1
+                    if files_filtered <= 3:
+                        self.log(f"      🚫 跳过删除被过滤的文件: {rel_path}")
+                    continue
+
+                self.log(f"      🗑️ 删除多余文件: {rel_path} ({file_size} 字节)")
+                files_to_delete += 1
+
+                op = FileOperation(
+                    'delete', '', des_file, file_size,
+                    operation_location='target', rule_index=rule_index
+                )
+                self.operations.append(op)
+
         self.log(f"  同步删除检查完成: 需删除 {files_to_delete} 个文件，跳过 {files_filtered} 个被过滤的文件")
     
-    def _should_copy_file(self, src_file: str, des_file: str, duplicate_mode: str) -> bool:
+    def _should_copy_file(self, src_file: str, des_file: str, duplicate_mode: str,
+                          src_size: int | None = None, src_mtime: float | None = None,
+                          des_exists: bool | None = None,
+                          des_size: int | None = None, des_mtime: float | None = None) -> bool:
         """
         判断文件是否需要复制
-        
-        Args:
-            src_file: 源文件路径
-            des_file: 目标文件路径
-            duplicate_mode: 重复文件处理模式
-            
-        Returns:
-            是否需要复制
+
+        批量模式下 src_size/src_mtime/des_exists/des_size/des_mtime 由调用方预取，
+        避免逐文件 ADB shell 调用。单文件模式下（参数为 None）回退到逐个查询。
         """
-        if os.path.exists(des_file):
+        # 获取目标文件是否存在
+        if des_exists is None:
+            des_exists = adb_bridge.exists(des_file)
+
+        if des_exists:
             if duplicate_mode == 'skip':
                 return False
             elif duplicate_mode == 'overwrite':
                 return True
             elif duplicate_mode == 'check':
                 try:
-                    src_mtime = int(os.path.getmtime(src_file))
-                    des_mtime = int(os.path.getmtime(des_file))
-                    src_size = os.path.getsize(src_file)
-                    des_size = os.path.getsize(des_file)
-                    #return not (src_mtime == des_mtime and src_size == des_size)
-                    #"""
-                    if src_mtime == des_mtime and src_size == des_size:
+                    if src_mtime is None:
+                        src_mtime = adb_bridge.getmtime(src_file)
+                    if des_mtime is None:
+                        des_mtime = adb_bridge.getmtime(des_file)
+                    if src_size is None:
+                        src_size = adb_bridge.getsize(src_file)
+                    if des_size is None:
+                        des_size = adb_bridge.getsize(des_file)
+
+                    src_mtime_i = int(src_mtime)
+                    des_mtime_i = int(des_mtime)
+
+                    if src_mtime_i == des_mtime_i and src_size == des_size:
                         return False
                     else:
-                        # 详细比较差异
                         result = False
-                        time_diff = abs(src_mtime - des_mtime)
+                        time_diff = abs(src_mtime_i - des_mtime_i)
                         size_diff = abs(src_size - des_size)
-                        reason_parts = []
                         if time_diff > 10:
-                            #reason_parts.append(f"时间差: {time_diff:.1f}秒")
                             result = True
                         if size_diff != 0:
-                            #reason_parts.append(f"大小差: {size_diff}字节")
                             result = True
-                        #reason = ", ".join(reason_parts)
-                        #self.log(f"        需更新 ({reason})")
                         return result
-                    #"""
                 except OSError as e:
                     self.log(f"        ⚠️ 检查文件时出错，强制复制: {e}")
                     return True
@@ -441,27 +516,18 @@ class PreviewManager:
         return os.path.dirname(file_path)
     
     def _find_source_base_for_delete(self, des_path: str) -> str:
+        """为删除操作找到对应的源基础路径（回退方案）
+
+        优先从已保存的路径规则中匹配，找不到则返回目标父目录。
+        不使用 os.walk（对 ADB 路径不可用且极慢）。
         """
-        为删除操作找到对应的源基础路径
+        # 尝试从已保存的路径规则中匹配
+        if hasattr(self, '_current_rules'):
+            for rule in self._current_rules:
+                if des_path.startswith(rule.des_dir):
+                    return rule.src_dir
         
-        Args:
-            des_path: 目标文件路径
-            
-        Returns:
-            对应的源基础路径
-        """
-        # 通过查找哪个路径对包含这个目标路径来推断源路径
-        import os
-        
-        # 这里简化处理：通过分析目标路径推断源路径
-        # 在实际实现中，应该基于 PathRule 来匹配
-        for root, dirs, files in os.walk(os.path.dirname(des_path)):
-            # 简单启发式：寻找同名的可能源路径
-            if os.path.basename(des_path) in files:
-                # 找到了可能的对应源，返回其目录
-                return root
-        
-        # 如果找不到，返回目标路径的父目录
+        # 回退：返回目标路径的父目录
         return os.path.dirname(des_path)
     
     def _merge_file_operations(self, operations: List[FileOperation], base_path: str, operation_type: str) -> List[str]:
