@@ -1,10 +1,12 @@
 ﻿from datetime import datetime
 from typing import List, Dict, Any
 import json
+import os
 
-from models import FileOperation, PathRule
+from . import PROJECT_ROOT
+from .models import FileOperation, PathRule
 
-PROGRESS_FILE = 'progress.txt'
+PROGRESS_FILE = os.path.join(PROJECT_ROOT, 'progress.txt')
 
 def write_progress(operations: List[FileOperation], current_index: int, mode: str,
                   duplicate_mode: str, skip_older: bool, timestamp: datetime, 

@@ -4,9 +4,9 @@ from typing import List, Callable, Optional, Tuple
 
 from PySide6.QtCore import QThread, Signal
 
-from models import FileOperation, PathRule
-import adb_bridge
-import logger
+from .models import FileOperation, PathRule
+from . import adb_bridge
+from . import logger
 
 
 class PreviewWorker(QThread):

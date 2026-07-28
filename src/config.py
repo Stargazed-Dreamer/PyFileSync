@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import List
 import os
 
-from models import PathRule
+from .models import PathRule
 
 def load_config(file_path: str) -> tuple[datetime, List[PathRule]]:
     """加载配置文件（新格式）

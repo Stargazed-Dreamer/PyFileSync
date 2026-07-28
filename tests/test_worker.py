@@ -5,8 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from models import FileOperation
-from worker import BackupWorker
+from src.models import FileOperation
+from src.worker import BackupWorker
 
 
 class BackupWorkerTests(unittest.TestCase):
@@ -107,7 +107,7 @@ class BackupWorkerTests(unittest.TestCase):
         )
         worker.copy_backend = "robocopy"
 
-        with patch("worker.subprocess.run", return_value=SimpleNamespace(returncode=1)) as run_mock:
+        with patch("src.worker.subprocess.run", return_value=SimpleNamespace(returncode=1)) as run_mock:
             with patch.object(BackupWorker, "_destination_matches", return_value=True):
                 worker.run()
 

@@ -10,8 +10,10 @@ import os
 import threading
 from datetime import datetime
 
-# 日志文件路径（与 main.py 同目录）
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backup_log.txt')
+from . import PROJECT_ROOT
+
+# 日志文件路径（项目根目录下的 backup_log.txt）
+LOG_FILE = os.path.join(PROJECT_ROOT, 'backup_log.txt')
 
 # 日志文件最大大小（1MB），超过后截断保留最后 256KB
 MAX_LOG_SIZE = 1024 * 1024

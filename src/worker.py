@@ -7,9 +7,9 @@ from datetime import datetime
 from typing import List
 from PySide6.QtCore import QThread, Signal
 
-from models import FileOperation, ResumeState
-import adb_bridge
-import logger
+from .models import FileOperation, ResumeState
+from . import adb_bridge
+from . import logger
 
 class BackupWorker(QThread):
     """备份工作线程

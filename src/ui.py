@@ -11,15 +11,15 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
-from models import FileOperation, PathRule
-from worker import BackupWorker
-from widgets import DropLineEdit
-from config import load_config, write_config, update_timestamp_file
-from progress import write_progress, has_progress_file, read_progress
-from preview import PreviewManager, PreviewWorker
-import adb_bridge
-from adb_browser import PhoneBrowserDialog
-import logger
+from .models import FileOperation, PathRule
+from .worker import BackupWorker
+from .widgets import DropLineEdit
+from .config import load_config, write_config, update_timestamp_file
+from .progress import write_progress, has_progress_file, read_progress
+from .preview import PreviewManager, PreviewWorker
+from . import adb_bridge
+from .adb_browser import PhoneBrowserDialog
+from . import logger
 
 b_progress_file_checked = False
 

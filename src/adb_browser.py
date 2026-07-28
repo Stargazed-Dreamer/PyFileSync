@@ -13,9 +13,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
-import adb_bridge
+from . import adb_bridge
+from . import PROJECT_ROOT
 
-STATE_FILE = 'adb_browser_state.json'
+STATE_FILE = os.path.join(PROJECT_ROOT, 'adb_browser_state.json')
 
 
 class _ListDirWorker(QThread):

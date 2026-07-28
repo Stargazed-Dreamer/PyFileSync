@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, call
 
-import adb_bridge
+from src import adb_bridge
 
 
 class TestPathUtils(unittest.TestCase):
@@ -75,7 +75,7 @@ class TestListDevices(unittest.TestCase):
             'List of devices attached\n'
             'SERIAL123456789    device product:foo model:Pixel_7 device:bar transport_id:1\n'
         )
-        with patch('adb_bridge.subprocess.run', return_value=self._mock_run(stdout)):
+        with patch('src.adb_bridge.subprocess.run', return_value=self._mock_run(stdout)):
             devices = adb_bridge.list_devices()
         self.assertEqual(len(devices), 1)
         self.assertEqual(devices[0]['serial'], 'SERIAL123456789')
@@ -89,20 +89,20 @@ class TestListDevices(unittest.TestCase):
             'device2    unauthorized\n'
             'device3    offline\n'
         )
-        with patch('adb_bridge.subprocess.run', return_value=self._mock_run(stdout)):
+        with patch('src.adb_bridge.subprocess.run', return_value=self._mock_run(stdout)):
             devices = adb_bridge.list_devices()
         self.assertEqual(len(devices), 1)
         self.assertEqual(devices[0]['serial'], 'device1')
 
     def test_list_devices_empty(self):
         stdout = 'List of devices attached\n'
-        with patch('adb_bridge.subprocess.run', return_value=self._mock_run(stdout)):
+        with patch('src.adb_bridge.subprocess.run', return_value=self._mock_run(stdout)):
             devices = adb_bridge.list_devices()
         self.assertEqual(devices, [])
 
     def test_is_device_connected(self):
         stdout = 'List of devices attached\nSERIAL_X    device model:TestPhone\n'
-        with patch('adb_bridge.subprocess.run', return_value=self._mock_run(stdout)):
+        with patch('src.adb_bridge.subprocess.run', return_value=self._mock_run(stdout)):
             self.assertTrue(adb_bridge.is_device_connected('SERIAL_X'))
             self.assertFalse(adb_bridge.is_device_connected('NOT_CONNECTED'))
 
@@ -140,7 +140,7 @@ class TestCopyFileDirection(unittest.TestCase):
 
     def test_copy_adb_to_local_calls_pull(self):
         """src=adb://, dst=local → adb pull"""
-        with patch('adb_bridge._adb_pull') as mock_pull:
+        with patch('src.adb_bridge._adb_pull') as mock_pull:
             adb_bridge.copy_file(
                 'adb://SERIAL/sdcard/file.txt',
                 r'C:\local\file.txt'
@@ -151,7 +151,7 @@ class TestCopyFileDirection(unittest.TestCase):
 
     def test_copy_local_to_adb_calls_push(self):
         """src=local, dst=adb:// → adb push"""
-        with patch('adb_bridge._adb_push') as mock_push:
+        with patch('src.adb_bridge._adb_push') as mock_push:
             adb_bridge.copy_file(
                 r'C:\local\file.txt',
                 'adb://SERIAL/sdcard/file.txt'
@@ -186,20 +186,20 @@ class TestAdbShellErrorHandling(unittest.TestCase):
 
     def test_adb_shell_raises_on_nonzero_return(self):
         result = SimpleNamespace(returncode=1, stdout='', stderr='error: device not found')
-        with patch('adb_bridge.subprocess.run', return_value=result):
+        with patch('src.adb_bridge.subprocess.run', return_value=result):
             with self.assertRaises(OSError) as ctx:
                 adb_bridge._adb_shell('ls', 'SERIAL')
             self.assertIn('device not found', str(ctx.exception))
 
     def test_adb_shell_raises_on_timeout(self):
         import subprocess
-        with patch('adb_bridge.subprocess.run', side_effect=subprocess.TimeoutExpired('adb', 5)):
+        with patch('src.adb_bridge.subprocess.run', side_effect=subprocess.TimeoutExpired('adb', 5)):
             with self.assertRaises(OSError) as ctx:
                 adb_bridge._adb_shell('ls', 'SERIAL')
             self.assertIn('超时', str(ctx.exception))
 
     def test_adb_shell_raises_on_missing_adb(self):
-        with patch('adb_bridge.subprocess.run', side_effect=FileNotFoundError()):
+        with patch('src.adb_bridge.subprocess.run', side_effect=FileNotFoundError()):
             with self.assertRaises(OSError) as ctx:
                 adb_bridge._adb_shell('ls', 'SERIAL')
             self.assertIn('未找到', str(ctx.exception))
