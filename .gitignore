@@ -179,3 +179,24 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# === Agent 运行时数据 ===
+.agents/memory/*.json
+.agents/wip/*.json
+.agents/wip/*.md
+!.agents/wip/.gitkeep
+!.agents/memory/.gitkeep
+.agents/specs/
+
+# === 临时文件 ===
+temp/
+!temp/.gitkeep
+
+# === 项目运行时产物 ===
+progress.txt
+backup.txt
+phone_config.txt
+backup_log.txt
+adb_browser_state.json
+*_old
+*_old.*
