@@ -1,0 +1,38 @@
+# PyFileSync 手机备份配置文件示例
+# ============================================================
+# 复制本文件为 phone_config.txt 后编辑。phone_config.txt 已在 .gitignore 中。
+#
+# 本配置用于 ADB 手机备份。使用前需：
+#   1. 安装 ADB 工具（Android SDK Platform Tools）
+#   2. 手机开启 USB 调试并连接电脑
+#   3. 在手机上授权此电脑（首次连接会弹窗）
+#   4. 运行 adb devices 确认设备在线（状态为 device 而非 unauthorized）
+#
+# 设备序列号获取：
+#   命令行运行 adb devices -l，第一列即为序列号
+#   也可在应用内点击"浏览手机"按钮图形化选择设备
+#
+# ADB 路径格式：adb://<设备序列号>/<手机路径>
+#   - 手机→电脑：adb://SERIAL123456789/sdcard/DCIM -> D:/Backup/Phone/DCIM
+#   - 电脑→手机：D:/Backup/Phone/Ringtones -> adb://SERIAL123456789/sdcard/Ringtones
+#
+# 其余格式与 main_config.txt 相同（| 元数据、❌/✔ 过滤、* 时间戳等）
+# ============================================================
+
+*2025.01.01 00:00:00
+
+# 示例 1：手机相册备份到电脑（增量更新 + 检查日期和大小）
+adb://SERIAL123456789/sdcard/DCIM -> D:/Backup/Phone/DCIM |重复文件:检查日期和大小 |增删文件处理:增量更新
+  ❌ .thumbnails
+  ❌ .tmp
+
+# 示例 2：手机下载目录备份到电脑（完全同步，删除目标侧多余文件）
+adb://SERIAL123456789/sdcard/Download -> D:/Backup/Phone/Download |重复文件:检查日期和大小 |增删文件处理:完全同步
+
+# 示例 3：电脑铃声推送到手机（电脑→手机方向）
+D:/Backup/Phone/Ringtones -> adb://SERIAL123456789/sdcard/Ringtones |重复文件:覆盖
+
+# 示例 4：手机截图备份（带过滤例外）
+adb://SERIAL123456789/sdcard/Pictures/Screenshots -> D:/Backup/Phone/Screenshots |重复文件:检查日期和大小
+  ❌ tmp
+    ✔ keep_this.png

@@ -128,7 +128,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2  # 秒
 
 # adb pull/push 在 Windows 上会把本地路径中的 [ ] 当作 glob 字符类展开，
-# 导致含方括号的路径（如 SampleApp 目录名 [Chinese] [SampleGroup]）无法创建文件。
+# 导致含方括号的路径（如某些应用数据目录 [Albums]）无法创建文件。
 # 检测到方括号时，先传输到无特殊字符的临时路径，再 shutil.move 到目标。
 _GLOB_CHARS = frozenset('[]*?')
 
