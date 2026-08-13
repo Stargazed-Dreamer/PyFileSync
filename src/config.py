@@ -9,14 +9,17 @@ def load_config(file_path: str) -> tuple[datetime, List[PathRule]]:
     格式示例：
     *2025.11.16 10:00:00
     C:\\test -> E:\\test
-    C:\\root → D:\\rootBackup |重复文件:检查日期和大小
+    C:\\root → D:\\rootBackup |相同文件:检查日期和大小
       ❌ ignored_file.txt
       ❌ ignored_dir
         ✔ 仍然备份的文件.exe
 
     说明：
     - 顶行以 `*YYYY.MM.DD HH:MM:SS` 表示时间戳（用于“跳过早于时间戳”）
-    - 路径对使用 `->` 或 `→` 分隔，允许尾部注释 `|重复文件:<覆盖|跳过|检查日期和大小>`
+    - 路径对使用 `->` 或 `→` 分隔，允许尾部注释 `|相同文件:<覆盖|跳过|检查日期和大小>`
+    - 可选尾部标签：`|增删文件处理:<增量更新|完全同步>`、
+      `|文件移动识别:<不识别|按元信息识别|按哈希识别>`、`|增量移动识别`、
+      `|状态:<启用|禁用>`（均缺省兼容旧配置）
     - 过滤规则行以空格缩进，并以 `❌` 表示排除，`✔` 表示包含（作为排除例外）
     - 过滤规则为相对路径（相对于源目录）
     - `#`起始的行视为注释
@@ -55,7 +58,7 @@ def load_config(file_path: str) -> tuple[datetime, List[PathRule]]:
             src, des = [p.strip() for p in pair.split(sep, 1)]
 
             duplicate_mode = 'overwrite'
-            if '重复文件' in meta:
+            if '相同文件' in meta:
                 if '检查日期和大小' in meta:
                     duplicate_mode = 'check'
                 elif '跳过' in meta:
@@ -69,7 +72,18 @@ def load_config(file_path: str) -> tuple[datetime, List[PathRule]]:
                     change_mode = 'sync'
                 elif '增量更新' in meta:
                     change_mode = 'incremental'
-            
+
+            # 文件移动识别策略（缺省为不识别，兼容旧配置）
+            move_mode = 'none'
+            if '文件移动识别' in meta:
+                if '按哈希识别' in meta:
+                    move_mode = 'hash'
+                elif '按元信息识别' in meta:
+                    move_mode = 'meta'
+
+            # 增量更新下启用移动识别（标签存在即启用）
+            move_in_incremental = '增量移动识别' in meta
+
             # 解析启用状态
             enabled = True
             if '状态:禁用' in meta:
@@ -78,7 +92,8 @@ def load_config(file_path: str) -> tuple[datetime, List[PathRule]]:
                 enabled = True
 
             current = PathRule(src_dir=src, des_dir=des, duplicate_mode=duplicate_mode, 
-                             change_mode=change_mode, enabled=enabled)
+                             change_mode=change_mode, move_mode=move_mode,
+                             move_in_incremental=move_in_incremental, enabled=enabled)
             rules.append(current)
             continue
 
@@ -99,7 +114,7 @@ def write_config(file_path: str, timestamp: datetime, rules: List[PathRule]):
     """写入配置文件（新格式）
     - 备份原文件到 `<file_path>_old`
     - 顶行时间戳，随后为每个路径规则与其过滤子行
-    - 规则行：`SRC → DEST |重复文件:<覆盖|跳过|检查日期和大小>`
+    - 规则行：`SRC → DEST |相同文件:<覆盖|跳过|检查日期和大小> |增删文件处理:<增量更新|完全同步> |文件移动识别:<不识别|按元信息识别|按哈希识别> [|增量移动识别] |状态:<启用|禁用>`
     - 过滤行：以两个空格缩进并以 `❌` 或 `✔` 前缀
     """
     import shutil
@@ -117,8 +132,17 @@ def write_config(file_path: str, timestamp: datetime, rules: List[PathRule]):
                 'check': '检查日期和大小'
             }.get(rule.duplicate_mode, '覆盖')
             change_cn = '完全同步' if getattr(rule, 'change_mode', 'incremental') == 'sync' else '增量更新'
+            move_cn = {
+                'none': '不识别',
+                'meta': '按元信息识别',
+                'hash': '按哈希识别'
+            }.get(getattr(rule, 'move_mode', 'none'), '不识别')
             enabled_cn = '启用' if rule.enabled else '禁用'
-            f.write(f"{rule.src_dir} → {rule.des_dir} |重复文件:{mode_cn} |增删文件处理:{change_cn} |状态:{enabled_cn}\n")
+            line = (f"{rule.src_dir} → {rule.des_dir} |相同文件:{mode_cn} "
+                    f"|增删文件处理:{change_cn} |文件移动识别:{move_cn}")
+            if getattr(rule, 'move_in_incremental', False):
+                line += " |增量移动识别"
+            f.write(line + f" |状态:{enabled_cn}\n")
             for ex in rule.excludes:
                 f.write(f"  ❌ {ex}\n")
             for inc in rule.includes:

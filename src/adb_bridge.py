@@ -127,6 +127,18 @@ def _adb_shell(cmd: str, serial: str, timeout: int = SHELL_TIMEOUT) -> str:
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # 秒
 
+# -p（保留时间戳）支持探测：较新的 platform-tools 支持 push/pull -p，
+# 旧版本会报 unknown option。首次被拒绝后记住结论，后续传输不再带 -p。
+_pull_preserve_supported = True
+_push_preserve_supported = True
+
+def _preserve_flag_rejected(message: str) -> bool:
+    """判断 adb 错误信息是否为"不支持 -p 参数"（旧版 platform-tools）"""
+    lowered = (message or '').lower()
+    return any(key in lowered for key in (
+        'unknown option', 'unrecognized option', 'invalid option', 'bad argument'
+    ))
+
 # adb pull/push 在 Windows 上会把本地路径中的 [ ] 当作 glob 字符类展开，
 # 导致含方括号的路径（如某些应用数据目录 [Albums]）无法创建文件。
 # 检测到方括号时，先传输到无特殊字符的临时路径，再 shutil.move 到目标。
@@ -171,7 +183,13 @@ def _adb_pull(remote_path: str, local_path: str, serial: str,
 
 def _adb_pull_direct(remote_path: str, local_path: str, serial: str,
                      timeout: int) -> None:
-    """直接 adb pull（原始逻辑 + 重试）"""
+    """直接 adb pull（原始逻辑 + 重试）
+
+    带 -p 保留源文件时间戳（文件移动识别的元信息匹配依赖它）；
+    旧版 adb 不支持 -p 时自动降级为普通 pull。
+    """
+    global _pull_preserve_supported
+
     # 确保目标目录存在
     target_dir = os.path.dirname(local_path)
     if target_dir:
@@ -180,14 +198,21 @@ def _adb_pull_direct(remote_path: str, local_path: str, serial: str,
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
+            command = ['adb', '-s', serial, 'pull']
+            if _pull_preserve_supported:
+                command.append('-p')
+            command.extend([remote_path, local_path])
             result = subprocess.run(
-                ['adb', '-s', serial, 'pull', remote_path, local_path],
+                command,
                 capture_output=True, text=True, encoding='utf-8', errors='replace',
                 timeout=timeout,
             )
             if result.returncode == 0:
                 return
             last_err = result.stderr.strip() or result.stdout.strip()
+            if _pull_preserve_supported and _preserve_flag_rejected(last_err):
+                _pull_preserve_supported = False  # 旧版 adb：去掉 -p 立即重试
+                continue
         except subprocess.TimeoutExpired:
             last_err = f"超时 ({timeout}s)"
         except FileNotFoundError:
@@ -245,18 +270,31 @@ def _adb_push(local_path: str, remote_path: str, serial: str,
 
 def _adb_push_direct(local_path: str, remote_path: str, serial: str,
                      timeout: int) -> None:
-    """直接 adb push（原始逻辑 + 重试）"""
+    """直接 adb push（原始逻辑 + 重试）
+
+    带 -p 保留源文件时间戳（文件移动识别的元信息匹配依赖它）；
+    旧版 adb 不支持 -p 时自动降级为普通 push。
+    """
+    global _push_preserve_supported
+
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
+            command = ['adb', '-s', serial, 'push']
+            if _push_preserve_supported:
+                command.append('-p')
+            command.extend([local_path, remote_path])
             result = subprocess.run(
-                ['adb', '-s', serial, 'push', local_path, remote_path],
+                command,
                 capture_output=True, text=True, encoding='utf-8', errors='replace',
                 timeout=timeout,
             )
             if result.returncode == 0:
                 return
             last_err = result.stderr.strip() or result.stdout.strip()
+            if _push_preserve_supported and _preserve_flag_rejected(last_err):
+                _push_preserve_supported = False  # 旧版 adb：去掉 -p 立即重试
+                continue
         except subprocess.TimeoutExpired:
             last_err = f"超时 ({timeout}s)"
         except FileNotFoundError:
@@ -461,3 +499,57 @@ def copy_file(src: str, dst: str) -> None:
     else:
         # 本地复制（保留元数据）
         shutil.copy2(src, dst)
+
+
+def move_file(src: str, dst: str) -> None:
+    """移动文件（两端必须在同一侧：都是本地，或同一台 ADB 设备）
+
+    - both local → shutil.move（同盘为 rename，跨盘自动复制+删除）
+    - both 同一 adb:// 设备 → adb shell mv
+    - 跨本地/手机 → 不支持，抛出 ValueError
+
+    用于文件移动识别：目标侧旧副本直接移动到新位置，避免重新传输。
+    """
+    src_is_adb = is_adb_path(src)
+    dst_is_adb = is_adb_path(dst)
+
+    if src_is_adb != dst_is_adb:
+        raise ValueError("不支持跨本地/手机移动文件")
+
+    if src_is_adb:
+        src_serial, src_android = parse_adb_path(src)
+        dst_serial, dst_android = parse_adb_path(dst)
+        if src_serial != dst_serial:
+            raise ValueError("不支持跨设备移动文件")
+        # 跨文件系统时 mv 会退化为复制+删除，大文件可能较慢，给足超时
+        _adb_shell(f'mv "{src_android}" "{dst_android}"', src_serial,
+                   timeout=TRANSFER_TIMEOUT)
+    else:
+        shutil.move(src, dst)
+
+
+def hash_file(path: str) -> str:
+    """计算文件 MD5（小写十六进制）
+
+    - 本地路径：分块读取计算，内存占用恒定
+    - ADB 路径：设备端 md5sum 计算，不传输文件内容（失败抛 OSError）
+
+    供文件移动识别的哈希匹配使用；调用方捕获 OSError 做安全降级。
+    """
+    import hashlib
+
+    if is_adb_path(path):
+        serial, android_path = parse_adb_path(path)
+        output = _adb_shell(f'md5sum "{android_path}"', serial,
+                            timeout=TRANSFER_TIMEOUT)
+        first_line = output.strip().split('\n')[0].strip()
+        parts = first_line.split()
+        if not parts or len(parts[0]) != 32:
+            raise OSError(f"无法解析 md5sum 输出: {first_line!r}")
+        return parts[0].lower()
+
+    digest = hashlib.md5()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()

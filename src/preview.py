@@ -130,14 +130,16 @@ class PreviewManager:
         # 统计操作数量
         copy_count = sum(1 for op in self.operations if op.operation == 'copy')
         delete_count = sum(1 for op in self.operations if op.operation == 'delete')
+        move_count = sum(1 for op in self.operations if op.operation == 'move')
         overwrite_count = sum(1 for op in self.operations if op.operation == 'copy' and op.is_overwrite)
         
         self.log(f"预览完成！总操作数: {len(self.operations)}")
         self.log(f"  - 新复制: {copy_count - overwrite_count} 个文件")
         self.log(f"  - 覆盖更新: {overwrite_count} 个文件")
+        self.log(f"  - 移动(识别): {move_count} 个文件")
         self.log(f"  - 删除: {delete_count} 个文件")
         
-        logger.log_session_end('预览', copy_count - overwrite_count + delete_count, 0, overwrite_count, 0)
+        logger.log_session_end('预览', copy_count - overwrite_count + delete_count + move_count, 0, overwrite_count, 0)
         
         return self.operations
     
@@ -214,6 +216,16 @@ class PreviewManager:
         # 构建源文件相对路径集合（供完全同步删除检查用）
         src_rel_paths: set[str] = set()
 
+        # 移动识别启用条件：完全同步按 move_mode 直接生效；
+        # 增量更新需要额外勾选“识别并移动发生移动的文件”
+        change_mode = getattr(rule, 'change_mode', 'incremental')
+        move_mode = getattr(rule, 'move_mode', 'none')
+        move_enabled = move_mode != 'none' and (
+            change_mode == 'sync' or getattr(rule, 'move_in_incremental', False)
+        )
+        # 移动识别候选：(相对路径, 源修改时间, 复制操作)，仅收集目标不存在的全新文件
+        new_file_candidates: list[tuple[str, float, FileOperation]] = []
+
         for src_file, file_size, file_mtime in all_files:
             files_processed += 1
             rel_path = self._compute_rel_path(src_file, src_dir)
@@ -253,21 +265,136 @@ class PreviewManager:
                 )
                 self.operations.append(op)
 
+                if move_enabled and not is_overwrite:
+                    new_file_candidates.append((rel_path, file_mtime, op))
+
         self.log(f"  源文件夹扫描完成: {files_processed} 个文件，过滤 {files_filtered} 个，需复制 {files_to_copy} 个")
 
+        # 文件移动识别：把“删旧位置 + 复制新位置”转换为目标侧移动操作
+        moved_rel_paths: set[str] = set()
+        if move_enabled and new_file_candidates:
+            moved_rel_paths = self._detect_moves(
+                rule, src_dir, des_dir, rule_index,
+                src_rel_paths, des_files_map, new_file_candidates
+            )
+
         # 如果是完全同步模式，处理目标文件夹中多余的文件
-        if getattr(rule, 'change_mode', 'incremental') == 'sync':
+        if change_mode == 'sync':
             self.log(f"  完全同步模式：检查目标文件夹中多余的文件")
-            self._process_sync_deletions(rule, src_dir, des_dir, rule_index, src_rel_paths)
+            self._process_sync_deletions(rule, src_dir, des_dir, rule_index,
+                                         src_rel_paths, moved_rel_paths)
         else:
             self.log(f"  增量更新模式：跳过删除检查")
     
+    def _detect_moves(self, rule: PathRule, src_dir: str, des_dir: str, rule_index: int,
+                      src_rel_paths: set[str], des_files_map: dict[str, tuple[int, float]],
+                      new_file_candidates: list[tuple[str, float, FileOperation]]) -> set[str]:
+        """文件移动识别：把“目标侧消失的文件”与“源侧全新文件”配对
+
+        匹配策略取决于 rule.move_mode：
+        - meta: 文件名相同 + 大小相同 + 修改时间差 ≤10 秒（与“检查日期和大小”容忍度一致）
+        - hash: 先按大小相同预筛候选，再比较 MD5（可识别改名移动）
+
+        配对成功时：移除原复制操作、生成目标侧移动操作，并抑制完全同步中
+        对该旧文件的删除。一对一匹配，先到先得。
+
+        Returns:
+            被识别为移动的目标文件相对路径集合
+        """
+        move_mode = getattr(rule, 'move_mode', 'none')
+
+        # 收集目标侧消失的文件（源侧不存在，且未被过滤）
+        gone_files: list[tuple[str, int, float]] = []
+        for rel, (size, mtime) in des_files_map.items():
+            if rel in src_rel_paths:
+                continue
+            src_file = self._build_path(src_dir, rel)
+            if (self._is_filtered_out(rel, rule.excludes, rule.includes)
+                    or self._is_filtered_out("", rule.excludes, rule.includes, src_file)):
+                continue
+            gone_files.append((rel, size, mtime))
+
+        if not gone_files:
+            return set()
+
+        moved: set[str] = set()
+        used_ops: set[int] = set()   # 已配对复制操作的 id()
+        removed_ids: set[int] = set()
+        move_ops: list[FileOperation] = []
+        hash_cache: dict[str, str] = {}
+        mode_cn = '元信息' if move_mode == 'meta' else '哈希'
+
+        def _cached_hash(path: str) -> str | None:
+            """带缓存计算 MD5，失败安全降级返回 None（该文件退回普通删除+复制）"""
+            cached = hash_cache.get(path)
+            if cached is not None:
+                return cached
+            try:
+                value = adb_bridge.hash_file(path)
+            except OSError as e:
+                self.log(f"      ⚠️ 哈希计算失败，跳过该文件的移动匹配: {path} ({e})")
+                return None
+            hash_cache[path] = value
+            return value
+
+        for gone_rel, gone_size, gone_mtime in gone_files:
+            gone_path = self._build_path(des_dir, gone_rel)
+            matched: tuple[str, FileOperation] | None = None
+
+            if move_mode == 'meta':
+                gone_name = os.path.normcase(gone_rel.rsplit('/', 1)[-1])
+                for rel, src_mtime, op in new_file_candidates:
+                    if id(op) in used_ops or op.size != gone_size:
+                        continue
+                    if os.path.normcase(rel.rsplit('/', 1)[-1]) != gone_name:
+                        continue
+                    if abs(int(src_mtime) - int(gone_mtime)) > 10:
+                        continue
+                    matched = (rel, op)
+                    break
+            else:  # hash
+                same_size = [
+                    (rel, op) for rel, _mtime, op in new_file_candidates
+                    if id(op) not in used_ops and op.size == gone_size
+                ]
+                if not same_size:
+                    continue
+                gone_hash = _cached_hash(gone_path)
+                if gone_hash is None:
+                    continue
+                for rel, op in same_size:
+                    if _cached_hash(op.src_path) == gone_hash:
+                        matched = (rel, op)
+                        break
+
+            if matched is None:
+                continue
+
+            matched_rel, matched_op = matched
+            used_ops.add(id(matched_op))
+            removed_ids.add(id(matched_op))
+            move_ops.append(FileOperation(
+                'move', gone_path, matched_op.des_path, gone_size,
+                operation_location='target', rule_index=rule_index
+            ))
+            moved.add(gone_rel)
+            self.log(f"      🔁 识别到移动 ({mode_cn}): {gone_rel} -> {matched_rel}")
+
+        if move_ops:
+            self.operations = [op for op in self.operations if id(op) not in removed_ids]
+            self.operations.extend(move_ops)
+            self.log(f"  移动识别完成: {len(move_ops)} 个文件将直接在目标侧移动")
+
+        return moved
+
     def _process_sync_deletions(self, rule: PathRule, src_dir: str, des_dir: str,
-                                rule_index: int, src_rel_paths: set[str] | None = None):
+                                rule_index: int, src_rel_paths: set[str] | None = None,
+                                moved_rel_paths: set[str] | None = None):
         """
         处理完全同步模式下的删除操作
 
         src_rel_paths 为源文件相对路径集合，提供时用内存查询替代逐文件 exists。
+        moved_rel_paths 为移动识别已处理的目标文件集合，这些文件不再删除。
         """
         if not adb_bridge.exists(des_dir):
             self.log(f"    目标文件夹不存在，无需删除: {des_dir}")
@@ -287,6 +414,9 @@ class PreviewManager:
                 src_exists = adb_bridge.exists(src_file)
 
             if not src_exists:
+                if moved_rel_paths and rel_path in moved_rel_paths:
+                    continue  # 已被移动识别转换为目标侧移动，不再删除
+
                 rel_path_filtered = self._is_filtered_out(rel_path, rule.excludes, rule.includes)
                 src_file = self._build_path(src_dir, rel_path)
                 src_path_filtered = self._is_filtered_out("", rule.excludes, rule.includes, src_file)
@@ -416,11 +546,13 @@ class PreviewManager:
         
         copy_count = sum(1 for op in self.operations if op.operation == 'copy')
         delete_count = sum(1 for op in self.operations if op.operation == 'delete')
+        move_count = sum(1 for op in self.operations if op.operation == 'move')
         overwrite_count = sum(1 for op in self.operations if op.operation == 'copy' and op.is_overwrite)
         
         summary = []
         summary.append(f"总操作数: {len(self.operations)}")
         summary.append(f"复制: {copy_count} (新建: {copy_count - overwrite_count}, 覆盖: {overwrite_count})")
+        summary.append(f"移动(识别): {move_count}")
         summary.append(f"删除: {delete_count}")
         
         return "\n".join(summary)
@@ -447,12 +579,18 @@ class PreviewManager:
             
             # 按操作类型分组
             copy_ops = [op for op in ops if op.operation == 'copy']
+            move_ops = [op for op in ops if op.operation == 'move']
             delete_ops = [op for op in ops if op.operation == 'delete']
             
             # 处理复制操作
             if copy_ops:
                 copy_display = self._merge_file_operations(copy_ops, src_base, 'copy')
                 merged_display.extend(copy_display)
+            
+            # 处理移动操作（移动识别产生，基于目标路径展示）
+            if move_ops:
+                move_display = self._merge_file_operations(move_ops, des_base, 'move')
+                merged_display.extend(move_display)
             
             # 处理删除操作
             if delete_ops:
@@ -677,6 +815,8 @@ class PreviewManager:
                                               if getattr(op, 'is_overwrite', False))
                         new_count = file_count - overwrite_count
                         display_lines.append(f"{prefix}📁 {name}/ [已合并] 新建:{new_count} 覆盖:{overwrite_count} 共:{file_count} 项")
+                    elif operation_type == 'move':
+                        display_lines.append(f"{prefix}📦 {name}/ [已合并] 移动:{file_count} 项")
                     else:
                         display_lines.append(f"{prefix}🗑️ {name}/ [已合并] 删除:{file_count} 项")
                     
@@ -697,6 +837,9 @@ class PreviewManager:
                             file_path = op.src_path or ""
                             operation_desc = "覆盖" if is_overwrite else "新建"
                             display_lines.append(f"{prefix}📄{operation_desc} {name}")
+                    elif operation_type == 'move':
+                        if op:
+                            display_lines.append(f"{prefix}📦 {name} (移动)")
                     else:
                         if op:
                             display_lines.append(f"{prefix}🗑️ {name}")

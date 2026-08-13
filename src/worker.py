@@ -16,7 +16,8 @@ class BackupWorker(QThread):
     - 接收操作清单并执行复制/删除
     - 海量小文件复制使用受控并发批次
     - Windows 上可用 RoboCopy 批量处理同目录文件
-    - 支持重复文件处理策略：overwrite/skip/check
+    - 支持相同文件处理策略：overwrite/skip/check
+    - 支持移动识别产生的目标侧移动操作（move）
     - 支持“跳过早于时间戳”的过滤
     - 预留断点续传扩展点（ResumeState）
     """
@@ -40,7 +41,7 @@ class BackupWorker(QThread):
             mode (str): 操作模式。
             skip_older (bool): 是否跳过比给定时间戳更旧的文件。
             timestamp (datetime): 用于比较文件修改时间的时间戳。
-            duplicate_mode (str): 处理重复文件的策略模式。
+            duplicate_mode (str): 处理相同文件的策略模式。
             resume_state (ResumeState | None, 可选): 用于断点续传的状态对象，默认为 None。
             start_index (int, 可选): 操作列表的开始索引，默认为 0。
             copy_workers (int | None, 可选): 复制并发数。None 时根据操作规模自动选择。
@@ -68,7 +69,7 @@ class BackupWorker(QThread):
         # RoboCopy 和多线程并发不支持 ADB pull/push
         has_adb = any(
             adb_bridge.is_adb_path(op.src_path) or adb_bridge.is_adb_path(op.des_path)
-            for op in operations if op.operation in ('copy', 'delete')
+            for op in operations if op.operation in ('copy', 'delete', 'move')
         )
         if has_adb:
             copy_backend = 'python'
@@ -369,6 +370,8 @@ class BackupWorker(QThread):
                 self._copy_file(op)
             elif op.operation == 'delete':
                 self._delete_file(op)
+            elif op.operation == 'move':
+                self._move_file(op)
         except Exception as e:
             op.status = 'failed'
             err_path = op.src_path or op.des_path
@@ -425,7 +428,7 @@ class BackupWorker(QThread):
                 self.log_message.emit(f"跳过(早于时间戳): {op.src_path}")
                 return
 
-        # 执行阶段不再二次判定重复策略（已在预览阶段生成操作清单时处理）
+        # 执行阶段不再二次判定相同策略（已在预览阶段生成操作清单时处理）
 
         # 确保目标目录存在
         target_dir = os.path.dirname(op.des_path)
@@ -446,6 +449,19 @@ class BackupWorker(QThread):
         adb_bridge.remove(op.des_path)
         op.status = 'success'
         self.log_message.emit(f"【删除|目标】 {op.des_path}")
+
+    def _move_file(self, op: FileOperation):
+        """移动文件（执行移动识别产生的目标侧移动操作）
+
+        op.src_path 为目标侧旧文件路径，op.des_path 为新位置。
+        不传输数据，因此不受“跳过早于时间戳”影响。
+        """
+        target_dir = os.path.dirname(op.des_path)
+        if target_dir:
+            adb_bridge.makedirs(target_dir)
+        adb_bridge.move_file(op.src_path, op.des_path)
+        op.status = 'success'
+        self.log_message.emit(f"【移动|目标】 {op.src_path} -> {op.des_path}")
 
     def stop(self):
         """停止操作"""

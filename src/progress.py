@@ -30,6 +30,7 @@ def write_progress(operations: List[FileOperation], current_index: int, mode: st
     # 操作列表，与路径规则关联
     COPY|<rule_index> <src> -> <des>
     DELETE|<rule_index> <des>
+    MOVE|<rule_index> <src> -> <des>
     """
     
     with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
@@ -56,6 +57,8 @@ def write_progress(operations: List[FileOperation], current_index: int, mode: st
                     'excludes': rule.excludes,
                     'includes': rule.includes,
                     'change_mode': getattr(rule, 'change_mode', 'incremental'),
+                    'move_mode': getattr(rule, 'move_mode', 'none'),
+                    'move_in_incremental': getattr(rule, 'move_in_incremental', False),
                     'enabled': getattr(rule, 'enabled', True)
                 }
                 path_rules_data.append(rule_dict)
@@ -72,6 +75,8 @@ def write_progress(operations: List[FileOperation], current_index: int, mode: st
                 line = f"COPY|{rule_index} {op.src_path} -> {op.des_path}\n"
             elif op.operation == 'delete':
                 line = f"DELETE|{rule_index} {op.des_path}\n"
+            elif op.operation == 'move':
+                line = f"MOVE|{rule_index} {op.src_path} -> {op.des_path}\n"
             else:
                 continue
             
@@ -195,6 +200,8 @@ def read_progress() -> tuple[List[FileOperation], int, str, bool, datetime, List
                             excludes=rule_data.get('excludes', []),
                             includes=rule_data.get('includes', []),
                             change_mode=rule_data.get('change_mode', 'incremental'),
+                            move_mode=rule_data.get('move_mode', 'none'),
+                            move_in_incremental=rule_data.get('move_in_incremental', False),
                             enabled=rule_data.get('enabled', True)
                         )
                         path_rules.append(rule)
@@ -220,6 +227,16 @@ def read_progress() -> tuple[List[FileOperation], int, str, bool, datetime, List
                     rule_index = int(parts[0].split('|')[1])
                     des = parts[1]
                     op = FileOperation('delete', '', des)
+                    op.rule_index = rule_index
+                    operations.append(op)
+
+            elif line.startswith('MOVE|'):
+                # 格式：MOVE|rule_index src -> des（移动识别产生的目标侧移动）
+                parts = line.split(' ', 1)
+                if len(parts) >= 2:
+                    rule_index = int(parts[0].split('|')[1])
+                    src, des = parts[1].split(' -> ')
+                    op = FileOperation('move', src, des, operation_location='target')
                     op.rule_index = rule_index
                     operations.append(op)
         

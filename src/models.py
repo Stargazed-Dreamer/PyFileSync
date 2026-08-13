@@ -27,7 +27,10 @@ class PathRule:
     """路径规则数据结构（新配置格式）
     - src_dir: 源目录
     - des_dir: 目标目录
-    - duplicate_mode: 重复文件策略：overwrite/skip/check
+    - duplicate_mode: 相同文件策略：overwrite/skip/check
+    - change_mode: 增删文件处理：incremental/sync
+    - move_mode: 文件移动识别：none/meta/hash
+    - move_in_incremental: 增量更新下是否启用移动识别
     - excludes: 排除列表（相对路径）
     - includes: 包含列表（相对路径，作为排除的例外）
     - enabled: 是否启用此规则
@@ -36,6 +39,8 @@ class PathRule:
     des_dir: str
     duplicate_mode: str = 'overwrite'
     change_mode: str = 'incremental'  # 增删文件处理：incremental（增量更新）或 sync（完全同步）
+    move_mode: str = 'none'  # 文件移动识别：none（不识别）/ meta（文件名+大小+修改时间）/ hash（MD5 哈希）
+    move_in_incremental: bool = False  # 增量更新模式下是否启用移动识别（完全同步模式直接按 move_mode 生效）
     excludes: list[str] = field(default_factory=list)
     includes: list[str] = field(default_factory=list)
     enabled: bool = True

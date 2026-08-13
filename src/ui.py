@@ -112,16 +112,17 @@ class FileBackupTool(QMainWindow):
         table_layout = QVBoxLayout(table_group)
 
         self.path_table = QTableWidget()
-        self.path_table.setColumnCount(6)
-        self.path_table.setHorizontalHeaderLabels(["启用", "源路径", "目标路径", "重复策略", "增删策略", "操作"])
+        self.path_table.setColumnCount(7)
+        self.path_table.setHorizontalHeaderLabels(["启用", "源路径", "目标路径", "相同策略", "增删策略", "移动策略", "操作"])
 
         header = self.path_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 启用列
         header.setSectionResizeMode(1, QHeaderView.Stretch)  # 源路径列
         header.setSectionResizeMode(2, QHeaderView.Stretch)  # 目标路径列
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 重复策略列
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 相同策略列
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # 增删策略列
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # 移动策略列
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
 
         self.path_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.path_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -197,12 +198,20 @@ class FileBackupTool(QMainWindow):
         self.rule_change_incremental = QRadioButton("增量更新")
         self.rule_change_incremental.setChecked(True)
         change_layout.addWidget(self.rule_change_incremental)
+        self.rule_incremental_move = QCheckBox("识别并移动发生移动的文件")
+        self.rule_incremental_move.setToolTip(
+            "仅增量更新下可用：识别源侧被移动的文件，并把目标侧对应文件直接移到新位置"
+        )
+        self.rule_incremental_move.setStyleSheet("margin-left: 18px;")
+        change_layout.addWidget(self.rule_incremental_move)
         self.rule_change_sync = QRadioButton("完全同步")
         change_layout.addWidget(self.rule_change_sync)
+        # 复选框仅在选中“增量更新”时可用
+        self.rule_change_incremental.toggled.connect(self.rule_incremental_move.setEnabled)
         strategies_row.addWidget(change_group, 1)
         
-        # 重复文件处理策略
-        rule_dup_group = QGroupBox("重复文件处理策略")
+        # 相同文件处理策略
+        rule_dup_group = QGroupBox("相同文件处理策略")
         rule_dup_layout = QVBoxLayout(rule_dup_group)
         self.rule_overwrite = QRadioButton("覆盖")
         self.rule_overwrite.setChecked(True)
@@ -212,6 +221,21 @@ class FileBackupTool(QMainWindow):
         self.rule_check = QRadioButton("检查日期和大小（相同则跳过）")
         rule_dup_layout.addWidget(self.rule_check)
         strategies_row.addWidget(rule_dup_group, 1)
+        
+        # 文件移动识别策略
+        move_group = QGroupBox("文件移动识别策略")
+        move_group.setToolTip(
+            "识别源侧被移动的文件，目标侧直接移动对应文件，避免删除后重新传输"
+        )
+        move_layout = QVBoxLayout(move_group)
+        self.rule_move_none = QRadioButton("不识别")
+        self.rule_move_none.setChecked(True)
+        move_layout.addWidget(self.rule_move_none)
+        self.rule_move_meta = QRadioButton("按元信息识别（文件名+大小+修改时间）")
+        move_layout.addWidget(self.rule_move_meta)
+        self.rule_move_hash = QRadioButton("按哈希识别（MD5，可识别改名）")
+        move_layout.addWidget(self.rule_move_hash)
+        strategies_row.addWidget(move_group, 1)
         
         edit_layout.addLayout(strategies_row)
         
@@ -358,6 +382,18 @@ class FileBackupTool(QMainWindow):
         elif self.rule_check.isChecked():
             duplicate_mode = 'check'
 
+        # 文件移动识别策略
+        move_mode = 'none'
+        if self.rule_move_meta.isChecked():
+            move_mode = 'meta'
+        elif self.rule_move_hash.isChecked():
+            move_mode = 'hash'
+        # 增量更新下的移动识别开关（完全同步时复选框不可用，不生效）
+        move_in_incremental = (
+            self.rule_incremental_move.isChecked()
+            and self.rule_change_incremental.isChecked()
+        )
+
         # 读取原始过滤规则
         excludes = self._read_filter_lines(prefix='❌')
         includes = self._read_filter_lines(prefix='✔')
@@ -373,7 +409,9 @@ class FileBackupTool(QMainWindow):
             duplicate_mode=duplicate_mode,
             excludes=final_excludes,
             includes=final_includes,
-            change_mode=('sync' if self.rule_change_sync.isChecked() else 'incremental')
+            change_mode=('sync' if self.rule_change_sync.isChecked() else 'incremental'),
+            move_mode=move_mode,
+            move_in_incremental=move_in_incremental
         )
         if hasattr(self, 'edit_index') and self.edit_index is not None:
             self.path_rules[self.edit_index] = rule
@@ -429,6 +467,19 @@ class FileBackupTool(QMainWindow):
             }.get(change_mode, '增量更新')
             self.path_table.setItem(row, 4, QTableWidgetItem(change_mode_cn))
             
+            # 显示移动策略（标注增量更新下是否实际生效）
+            move_mode = getattr(rule, 'move_mode', 'none')
+            move_method_cn = {'meta': '按元信息', 'hash': '按哈希'}.get(move_mode, '')
+            if move_mode == 'none':
+                move_mode_cn = '不识别'
+            elif change_mode == 'sync' or getattr(rule, 'move_in_incremental', False):
+                move_mode_cn = move_method_cn
+                if change_mode == 'incremental':
+                    move_mode_cn += ' (增量)'
+            else:
+                move_mode_cn = move_method_cn + ' (增量未启用)'
+            self.path_table.setItem(row, 5, QTableWidgetItem(move_mode_cn))
+            
             ops_widget = QWidget()
             ops_layout = QHBoxLayout(ops_widget)
             ops_layout.setContentsMargins(0, 0, 0, 0)
@@ -438,7 +489,7 @@ class FileBackupTool(QMainWindow):
             delete_btn.clicked.connect(lambda checked, r=row: self.delete_path_pair(r))
             ops_layout.addWidget(edit_btn)
             ops_layout.addWidget(delete_btn)
-            self.path_table.setCellWidget(row, 5, ops_widget)
+            self.path_table.setCellWidget(row, 6, ops_widget)
 
     def delete_path_pair(self, row):
         """删除指定行的路径对"""
@@ -697,7 +748,7 @@ class FileBackupTool(QMainWindow):
         # T14: ADB 路径设备确认
         has_adb = any(
             adb_bridge.is_adb_path(op.src_path) or adb_bridge.is_adb_path(op.des_path)
-            for op in self.operations if op.operation in ('copy', 'delete')
+            for op in self.operations if op.operation in ('copy', 'delete', 'move')
         )
         if has_adb:
             if not self._adb_available:
@@ -1096,6 +1147,11 @@ class FileBackupTool(QMainWindow):
             cm = getattr(rule, 'change_mode', 'incremental')
             self.rule_change_incremental.setChecked(cm == 'incremental')
             self.rule_change_sync.setChecked(cm == 'sync')
+            mm = getattr(rule, 'move_mode', 'none')
+            self.rule_move_none.setChecked(mm == 'none')
+            self.rule_move_meta.setChecked(mm == 'meta')
+            self.rule_move_hash.setChecked(mm == 'hash')
+            self.rule_incremental_move.setChecked(getattr(rule, 'move_in_incremental', False))
             self.edit_index = row
             self.add_btn.setText("保存")
 
