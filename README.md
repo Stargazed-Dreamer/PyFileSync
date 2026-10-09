@@ -1,6 +1,9 @@
 # PyFileSync
 
-基于 PySide6 的跨平台文件备份工具，支持本地目录同步、移动硬盘备份与 Android 手机文件双向备份（通过 ADB）。提供增量更新、完全同步、断点续传、预览审核等能力，面向需要可靠文件备份的桌面用户。
+基于 PySide6 的跨平台文件备份工具，支持本地目录同步、移动硬盘备份与 Android 手机文件双向备份（通过 ADB）。提供增量更新、完全同步、断点续传、预览审核等能力，主要自己用。
+
+<img width="1673" height="1155" alt="pyfilesync" src="https://github.com/user-attachments/assets/ee17d6ff-5a92-485b-9034-5a4120d04e9a" />
+
 
 ## 特性
 
@@ -169,17 +172,6 @@ A: 支持。ADB 备份在三平台行为一致；RoboCopy 仅 Windows 启用，�
 **Q: 配置文件改错了怎么办？**
 A: 每次写入配置文件前会自动备份为 `<file>_old`，可从 `_old` 文件恢复。
 
-## 路线图
-
-- [ ] 多语言支持（i18n）
-- [ ] 暗色模式 / 主题切换
-- [ ] 系统托盘 / 最小化到托盘
-- [ ] CLI 模式（无 GUI）
-- [ ] 便携版打包（PyInstaller）
-- [ ] MTP 协议支持（不依赖 ADB）
-- [ ] glob / 正则过滤
-- [ ] 实时速率和剩余时间预估
-
 ## 贡献
 
 欢迎提交 Issue 和 Pull Request。
@@ -196,22 +188,6 @@ python -m pytest tests/
 
 # 运行应用
 python main.py
-```
-
-### 项目结构
-
-```
-src/
-├── ui.py            # 主窗口
-├── widgets.py       # 自定义控件（拖放输入框等）
-├── worker.py        # 后台备份线程
-├── models.py        # 数据模型（PathRule / FileOperation）
-├── config.py        # 配置文件解析/写入
-├── preview.py       # 预览功能（容忍度合并算法）
-├── progress.py      # 进度跟踪与断点续传
-├── adb_bridge.py    # ADB 桥接（本地/ADB 透明路由）
-├── adb_browser.py   # ADB 设备浏览器对话框
-└── logger.py        # 日志模块
 ```
 
 ## 许可证
